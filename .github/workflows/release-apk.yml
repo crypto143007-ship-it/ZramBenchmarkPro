@@ -54,11 +54,11 @@ jobs:
               "Verified benchmark result": "Live active ZRAM observation",
               "Thread CPU time (avg per operation)": "Observed swap-out / swap-in time",
               "CPU time is process thread CPU time from Android Debug; it is not whole-device CPU utilization or hardware cycles.": "Throughput is calculated from system-wide pswpout/pswpin page-counter changes during the observation window. It is not per-app attribution. If counters do not change, no swap throughput is claimed.",
-              "Observed swap-out / swap-in": "Median kernel write / read"
+              "Median compression / decompression": "Observed swap-out / swap-in (system-wide)"
           }
           for old, new in replacements.items():
               s = s.replace(old, new)
-          s = "\n".join(line for line in s.splitlines() if 'MetricCard("Median kernel write / read time"' not in line and 'MetricCard("Thread CPU time' not in line) + "\n"
+          s = "\n".join(line for line in s.splitlines() if 'MetricCard("Median kernel write / read time"' not in line and 'MetricCard("Thread CPU time' not in line and 'MetricCard("Observed swap-out / swap-in time"' not in line) + "\n"
           ui.write_text(s)
           gradle = root / "app/build.gradle.kts"
           g = gradle.read_text().replace("versionCode = 1", "versionCode = 3").replace('versionName = "0.1.0"', 'versionName = "0.3.0"')
@@ -98,7 +98,7 @@ jobs:
           APK="$RUNNER_TEMP/project/ZramBenchmarkPro/app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
           cp "$APK" "$RUNNER_TEMP/ZramBenchmarkPro-v0.3.0-debug.apk"
-          echo "path=$RUNNER_TEMP/ZramBenchmarkPro-v0.2.0-debug.apk" >> "$GITHUB_OUTPUT"
+          echo "path=$RUNNER_TEMP/ZramBenchmarkPro-v0.3.0-debug.apk" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK build artifact
         uses: actions/upload-artifact@v4
@@ -122,5 +122,5 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "ZRAM Benchmark Pro 0.3.0" \
-              --notes "Installable debug-signed APK for ZRAM Benchmark Pro 0.2.0. Benchmarks the codec selected on active swap using a separate temporary ZRAM device; it never writes to active swap. Requires root and kernel zram-control hot_add/hot_remove support."
+              --notes "Installable debug-signed APK for ZRAM Benchmark Pro 0.3.0. Observes the existing active ZRAM device using read-only kernel counters. No root required; no scratch ZRAM device is created and active swap is never written directly."
           fi
