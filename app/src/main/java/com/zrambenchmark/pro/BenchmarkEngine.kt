@@ -44,7 +44,7 @@ data class SystemSnapshot(
 object BenchmarkEngine {
     private val zramRoots = listOf("/sys/block/zram0", "/sys/block/zram1", "/sys/block/zram2")
 
-    fun readText(path: String): String? = try { File(path).takeIf { it.canRead() }?.readText()?.trim() } catch (_: Exception) { null }
+    fun readText(path: String): String? = try { File(path).readText().trim() } catch (_: Exception) { null }
 
     fun detectAlgorithms(): List<AlgorithmInfo> {
         val result = mutableListOf<AlgorithmInfo>()
@@ -104,6 +104,12 @@ object BenchmarkEngine {
             val m = readCounters("/proc/vmstat")
             return (m["pswpout"] ?: 0L) to (m["pswpin"] ?: 0L)
         }
+        // Linux block-stat sectors are 512 bytes: field 3 is sectors read, field 7 sectors written.
+        fun blockIo(root: String): Pair<Long, Long>? {
+            val v = readText("$root/stat")?.split(Regex("\\s+"))?.mapNotNull { it.toLongOrNull() } ?: return null
+            if (v.size < 7) return null
+            return v[6] to v[2] // bytes-out sectors, bytes-in sectors
+        }
         fun mm(root: String): Pair<Long, Long>? {
             val values = readText("$root/mm_stat")?.split(Regex("\\s+"))?.mapNotNull { it.toLongOrNull() } ?: return null
             if (values.size < 2) return null
@@ -133,7 +139,7 @@ object BenchmarkEngine {
         val codec = readText("$root/comp_algorithm")?.split(Regex("\\s+"))?.firstOrNull { it.startsWith("[") }?.removeSurrounding("[", "]")
             ?: "Selected codec unavailable (sysfs permission restricted)"
         val initialMm = mm(root)
-        val initialSwap = vmSwap()
+        val initialSwap = vmSwap()\n        val initialBlock = blockIo(root)
         val rounds = repetitions.coerceIn(1, 10)
         val totalBytes = dataSizeMiB.coerceIn(1, 32) * 1024 * 1024
         val retained = ArrayList<ByteArray>()
@@ -143,7 +149,7 @@ object BenchmarkEngine {
             warmup[0] = 1
             val warmStart = vmSwap()
             val baselineMm = mm(root) ?: initialMm
-            val baselineSwap = vmSwap()
+            val baselineSwap = vmSwap()\n            val baselineBlock = blockIo(root)
             val chunkSize = max(4096, totalBytes / rounds)
             val startNs = System.nanoTime()
             repeat(rounds) { round ->
@@ -160,19 +166,21 @@ object BenchmarkEngine {
                 Thread.sleep(700)
             }
             val elapsedSeconds = ((System.nanoTime() - startNs).coerceAtLeast(1L)) / 1_000_000_000.0
-            val finalSwap = vmSwap()
+            val finalSwap = vmSwap()\n            val finalBlock = blockIo(root)
             val finalMm = mm(root) ?: baselineMm
             val outPages = (finalSwap.first - baselineSwap.first).coerceAtLeast(0L)
             val inPages = (finalSwap.second - baselineSwap.second).coerceAtLeast(0L)
             val pageBytes = 4096L
-            val swappedOut = outPages * pageBytes
-            val swappedIn = inPages * pageBytes
+            val swappedOut = if (baselineBlock != null && finalBlock != null)
+                (finalBlock.first - baselineBlock.first).coerceAtLeast(0L) * 512L else outPages * pageBytes
+            val swappedIn = if (baselineBlock != null && finalBlock != null)
+                (finalBlock.second - baselineBlock.second).coerceAtLeast(0L) * 512L else inPages * pageBytes
             val original = finalMm?.first ?: initialMm?.first ?: 0L
             val compressed = finalMm?.second ?: initialMm?.second ?: 0L
             val ratio = if (compressed > 0L) original.toDouble() / compressed.toDouble() else 0.0
             val saved = (original - compressed).coerceAtLeast(0L)
-            val swapObserved = outPages > 0L || inPages > 0L
-            val domain = if (swapObserved) "Live active ZRAM · system swap counters · $detection"
+            val swapObserved = swappedOut > 0L || swappedIn > 0L
+            val domain = if (swapObserved) "Live active ZRAM · device I/O counters · $detection"
                 else "Live active ZRAM · no swap traffic observed · $detection"
             BenchmarkResult(
                 codec, domain, original, compressed, ratio, saved,
