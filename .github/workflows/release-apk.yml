@@ -58,8 +58,7 @@ jobs:
           }
           for old, new in replacements.items():
               s = s.replace(old, new)
-          s = re.sub(r'^\\s*item \\{ MetricCard\\("Median kernel write / read time", .*?\\) \\}\\n', '', s, flags=re.M) if "Median kernel write / read time" in s else s
-          s = re.sub(r'^\\s*item \\{ MetricCard\\("Thread CPU time.*?\\n', '', s, flags=re.M)
+          s = "\\n".join(line for line in s.splitlines() if 'MetricCard("Median kernel write / read time"' not in line and 'MetricCard("Thread CPU time' not in line) + "\\n"
           ui.write_text(s)
           gradle = root / "app/build.gradle.kts"
           g = gradle.read_text().replace("versionCode = 1", "versionCode = 2").replace('versionName = "0.1.0"', 'versionName = "0.2.0"')
