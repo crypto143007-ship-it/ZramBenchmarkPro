@@ -94,89 +94,96 @@ object BenchmarkEngine {
         )
     }
 
-    /** Uses a disposable hot-added ZRAM device configured with the codec selected on active swap. Requires root. */
-    suspend fun runKernel(repetitions: Int = 5, dataSizeMiB: Int = 8): BenchmarkResult = withContext(Dispatchers.IO) {
-        val swapLine = readText("/proc/swaps").orEmpty().lines().drop(1).firstOrNull { it.contains("zram") }
-            ?: error("No active ZRAM swap device")
-        val index = Regex("zram(\\d+)").find(swapLine)?.groupValues?.get(1) ?: error("Cannot identify active ZRAM device")
-        val activeRoot = "/sys/block/zram" + index
-        val codec = readText("$activeRoot/comp_algorithm")?.split(Regex("\\s+"))?.firstOrNull { it.startsWith("[") }?.removeSurrounding("[", "]")
-            ?: error("Cannot read the codec selected on active ZRAM")
-        val bytes = dataSizeMiB.coerceIn(1, 32) * 1024 * 1024
-        val rounds = repetitions.coerceIn(1, 20)
-        val blocks = bytes / 4096
-        val input = File.createTempFile("zbp-kernel-", ".bin")
-        val output = File(input.parentFile, input.name + ".out")
-        try {
-            input.writeBytes(makeDataset(bytes))
-            val inPath = input.absolutePath.replace("'", "'\\''")
-            val outPath = output.absolutePath.replace("'", "'\\''")
-            val d = '$'
-            val script = """
-                set -eu
-                ADD=/sys/class/zram-control/hot_add
-                REMOVE=/sys/class/zram-control/hot_remove
-                [ -w "${d}ADD" ] || { echo 'ERROR=Kernel lacks writable hot_add'; exit 21; }
-                [ -w "${d}REMOVE" ] || { echo 'ERROR=Kernel lacks writable hot_remove; safe cleanup unavailable'; exit 22; }
-                BEFORE=" "
-                for p in /sys/block/zram*; do [ -e "${d}p" ] && BEFORE="${d}BEFORE ${d}{p##*/} "; done
-                echo 1 > "${d}ADD"
-                ROOT=""
-                for p in /sys/block/zram*; do
-                  [ -e "${d}p" ] || continue
-                  NAME=${d}{p##*/}
-                  case "${d}BEFORE" in *" ${d}NAME "*) ;; *) ROOT="${d}p"; break;; esac
-                done
-                [ -n "${d}ROOT" ] || { echo 'ERROR=hot_add did not create a new ZRAM device'; exit 23; }
-                IDX=${d}{ROOT##*zram}
-                DEV=/dev/block/zram${d}IDX
-                [ -e "${d}DEV" ] || DEV=/dev/zram${d}IDX
-                cleanup() { echo "${d}IDX" > "${d}REMOVE" 2>/dev/null || true; }
-                trap cleanup EXIT HUP INT TERM
-                [ -w "${d}ROOT/comp_algorithm" ] || { echo 'ERROR=Scratch codec control unavailable'; exit 24; }
-                echo '${codec}' > "${d}ROOT/comp_algorithm"
-                echo ${bytes} > "${d}ROOT/disksize"
-                [ -b "${d}DEV" ] || { echo 'ERROR=Scratch block device missing'; exit 25; }
-                IN='${inPath}'; OUT='${outPath}'; : > "${d}OUT"
-                WRITES=''; READS=''; i=0
-                while [ "${d}i" -lt ${rounds} ]; do
-                  T0=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
-                  dd if="${d}IN" of="${d}DEV" bs=4096 conv=fsync 2>/dev/null
-                  T1=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
-                  dd if="${d}DEV" of="${d}OUT" bs=4096 count=$blocks 2>/dev/null
-                  T2=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
-                  cmp -s "${d}IN" "${d}OUT" || { echo 'ERROR=Read-back verification failed'; exit 26; }
-                  W=${d}((T1-T0)); R=${d}((T2-T1))
-                  WRITES="${d}WRITES ${d}W"; READS="${d}READS ${d}R"; i=${d}((i+1))
-                done
-                set -- ${d}(cat "${d}ROOT/mm_stat")
-                echo CODEC='${codec}'; echo DEVICE=zram${d}IDX
-                echo ORIGINAL_BYTES=${d}1; echo COMPRESSED_BYTES=${d}2
-                echo WRITE_MS=${d}WRITES; echo READ_MS=${d}READS; echo VERIFIED=true
-            """.trimIndent()
-            val process = ProcessBuilder("su", "-c", "sh").redirectErrorStream(true).start()
-            process.outputStream.bufferedWriter().use { it.write(script) }
-            val response = process.inputStream.bufferedReader().readText()
-            val exit = process.waitFor()
-            if (exit != 0) {
-                val reason = Regex("ERROR=([^\\r\\n]+)").find(response)?.groupValues?.get(1)
-                    ?: response.takeLast(400).ifBlank { "Root command failed (exit $exit)" }
-                error(reason)
+    /** Observes the already-active system ZRAM using ordinary app permissions. Never writes to a ZRAM block device. */
+    suspend fun runLiveActive(repetitions: Int = 5, dataSizeMiB: Int = 8): BenchmarkResult = withContext(Dispatchers.IO) {
+        fun readCounters(path: String): Map<String, Long> = readText(path).orEmpty().lines().mapNotNull { line ->
+            val p = line.trim().split(Regex("\\s+"))
+            if (p.size >= 2) p[0] to (p[1].toLongOrNull() ?: return@mapNotNull null) else null
+        }.toMap()
+        fun vmSwap(): Pair<Long, Long> {
+            val m = readCounters("/proc/vmstat")
+            return (m["pswpout"] ?: 0L) to (m["pswpin"] ?: 0L)
+        }
+        fun mm(root: String): Pair<Long, Long>? {
+            val values = readText("$root/mm_stat")?.split(Regex("\\s+"))?.mapNotNull { it.toLongOrNull() } ?: return null
+            if (values.size < 2) return null
+            return values[0] to values[1]
+        }
+        val swapText = readText("/proc/swaps")
+        val swapLine = swapText?.lines()?.drop(1)?.firstOrNull { it.contains("zram") }
+        val root: String
+        val detection: String
+        if (swapLine != null) {
+            val index = Regex("zram(\\d+)").find(swapLine)?.groupValues?.get(1)
+                ?: error("Cannot identify the active ZRAM device in /proc/swaps")
+            root = "/sys/block/zram$index"
+            detection = "active swap confirmed"
+        } else {
+            val swapTotal = readText("/proc/meminfo")?.lineSequence()
+                ?.firstOrNull { it.startsWith("SwapTotal:") }?.substringAfter(":")?.trim()?.substringBefore(" ")?.toLongOrNull() ?: 0L
+            val candidates = zramRoots.filter { File(it).exists() && readText("$it/comp_algorithm")?.contains("[") == true }
+            if (swapText == null && swapTotal > 0 && candidates.size == 1) {
+                root = candidates.single()
+                detection = "active ZRAM inferred from SwapTotal and the only selected ZRAM device"
+            } else {
+                error("Android does not expose /proc/swaps to this app, so the active ZRAM device cannot be confirmed without root. No ZRAM device was modified.")
             }
-            fun field(key: String) = Regex("(?m)^" + key + "=(.*)$").find(response)?.groupValues?.get(1)?.trim()
-                ?: error("Missing " + key + " in kernel response")
-            val original = field("ORIGINAL_BYTES").toLong()
-            val compressed = field("COMPRESSED_BYTES").toLong()
-            val writes = field("WRITE_MS").split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.toDouble() }.filter { it > 0 }
-            val reads = field("READ_MS").split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.toDouble() }.filter { it > 0 }
-            if (field("VERIFIED") != "true" || original <= 0 || compressed <= 0 || writes.isEmpty() || reads.isEmpty()) error("Incomplete kernel benchmark statistics")
-            val writeMedian = median(writes); val readMedian = median(reads)
-            val device = field("DEVICE")
-            BenchmarkResult("$codec ($device)", "Native kernel ZRAM · temporary device", original, compressed,
-                original.toDouble() / compressed, original - compressed,
-                original / 1048576.0 / (writeMedian / 1000.0), original / 1048576.0 / (readMedian / 1000.0),
-                0.0, 0.0, writes.size, writeMedian, readMedian)
-        } finally { input.delete(); output.delete() }
+        }
+        if (!File(root).exists()) error("The active ZRAM sysfs device is not readable by this app")
+        val codec = readText("$root/comp_algorithm")?.split(Regex("\\s+"))?.firstOrNull { it.startsWith("[") }?.removeSurrounding("[", "]")
+            ?: "Selected codec unavailable (sysfs permission restricted)"
+        val initialMm = mm(root)
+        val initialSwap = vmSwap()
+        val rounds = repetitions.coerceIn(1, 10)
+        val totalBytes = dataSizeMiB.coerceIn(1, 32) * 1024 * 1024
+        val retained = ArrayList<ByteArray>()
+        try {
+            // One small warm-up allocation is deliberately excluded from the observed interval.
+            val warmup = ByteArray(256 * 1024) { (it * 31).toByte() }
+            warmup[0] = 1
+            val warmStart = vmSwap()
+            val baselineMm = mm(root) ?: initialMm
+            val baselineSwap = vmSwap()
+            val chunkSize = max(4096, totalBytes / rounds)
+            val startNs = System.nanoTime()
+            repeat(rounds) { round ->
+                val chunk = ByteArray(chunkSize.coerceAtMost(totalBytes - retained.sumOf { it.size })) 
+                var x = 0x13579B
+                var offset = 0
+                while (offset < chunk.size) {
+                    x = x xor (x shl 13); x = x xor (x ushr 17); x = x xor (x shl 5)
+                    chunk[offset] = (x and 0xff).toByte()
+                    offset += 4096
+                }
+                retained.add(chunk)
+                // Keep the touched anonymous pages resident in the test process while Android handles reclaim.
+                Thread.sleep(700)
+            }
+            val elapsedSeconds = ((System.nanoTime() - startNs).coerceAtLeast(1L)) / 1_000_000_000.0
+            val finalSwap = vmSwap()
+            val finalMm = mm(root) ?: baselineMm
+            val outPages = (finalSwap.first - baselineSwap.first).coerceAtLeast(0L)
+            val inPages = (finalSwap.second - baselineSwap.second).coerceAtLeast(0L)
+            val pageBytes = 4096L
+            val swappedOut = outPages * pageBytes
+            val swappedIn = inPages * pageBytes
+            val original = finalMm?.first ?: initialMm?.first ?: 0L
+            val compressed = finalMm?.second ?: initialMm?.second ?: 0L
+            val ratio = if (compressed > 0L) original.toDouble() / compressed.toDouble() else 0.0
+            val saved = (original - compressed).coerceAtLeast(0L)
+            val swapObserved = outPages > 0L || inPages > 0L
+            val domain = if (swapObserved) "Live active ZRAM · system swap counters · $detection"
+                else "Live active ZRAM · no swap traffic observed · $detection"
+            BenchmarkResult(
+                codec, domain, original, compressed, ratio, saved,
+                swappedOut / 1048576.0 / elapsedSeconds,
+                swappedIn / 1048576.0 / elapsedSeconds,
+                0.0, 0.0, rounds, 0.0, 0.0
+            )
+        } finally {
+            retained.clear()
+            System.gc()
+        }
     }
 
     private fun makeDataset(size: Int): ByteArray {
