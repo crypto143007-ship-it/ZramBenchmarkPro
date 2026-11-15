@@ -152,7 +152,7 @@ object BenchmarkEngine {
             val baselineSwap = vmSwap()\n            val baselineBlock = blockIo(root)
             val chunkSize = max(4096, totalBytes / rounds)
             val startNs = System.nanoTime()
-            repeat(rounds) { round ->
+            repeat(rounds) {
                 val chunk = ByteArray(chunkSize.coerceAtMost(totalBytes - retained.sumOf { it.size })) 
                 var x = 0x13579B
                 var offset = 0
