@@ -42,26 +42,26 @@ jobs:
           ui = root / "app/src/main/java/com/zrambenchmark/pro/MainActivity.kt"
           s = ui.read_text()
           replacements = {
-              "BenchmarkEngine.runStandalone(rounds, size) { !running }": "BenchmarkEngine.runKernel(rounds, size)",
-              "Warming up and measuring standalone DEFLATE…": "Preparing isolated kernel ZRAM test device…",
-              "Completed · round-trip verified": "Completed · kernel read-back verified",
-              "Standalone benchmark": "Native kernel ZRAM benchmark",
-              "The initial engine tests JDK DEFLATE with identical deterministic mixed-content data, warm-up, repeated compression/decompression, and byte-for-byte round-trip verification. It is not a kernel ZRAM benchmark.": "The app uses the codec selected on active swap, creates a temporary ZRAM device with that codec, writes and reads a mixed dataset through the kernel, verifies every byte and reads mm_stat. Active swap is never used as the test target.",
-              "Run a standalone test to create the first verified result. Kernel algorithms are discovered separately and are not silently switched.": "Run a native kernel ZRAM test. Root and hot_add/hot_remove support are required; active swap is never used as the test target.",
-              "Standalone tests are clearly separated from real ZRAM measurements.": "The benchmark uses the active swap codec on a temporary ZRAM device; live swap is left untouched.",
-              "Start benchmark": "Start native ZRAM test",
-              "Safety: standalone compression only. No swapoff, no zram reset, no algorithm write, no memory-exhaustion test.": "Safety: requires root. Uses only a temporary hot-added ZRAM device, then removes it. Never changes the live swap device. The test stops if safe temporary-device support is unavailable.",
-              "Verified benchmark result": "Verified kernel ZRAM result",
-              "Thread CPU time (avg per operation)": "Median kernel write / read time",
-              "CPU time is process thread CPU time from Android Debug; it is not whole-device CPU utilization or hardware cycles.": "Write throughput measures the kernel ZRAM compression path; read throughput measures the decompression path. These include block I/O and memory-copy overhead; CPU cycles are not measured.",
-              "Median compression / decompression": "Median kernel write / read"
+              "BenchmarkEngine.runStandalone(rounds, size) { !running }": "BenchmarkEngine.runLiveActive(rounds, size)",
+              "Warming up and measuring standalone DEFLATE…": "Sampling the active system ZRAM…",
+              "Completed · round-trip verified": "Completed · live system counters sampled",
+              "Standalone benchmark": "Live active ZRAM benchmark",
+              "The initial engine tests JDK DEFLATE with identical deterministic mixed-content data, warm-up, repeated compression/decompression, and byte-for-byte round-trip verification. It is not a kernel ZRAM benchmark.": "The app observes the ZRAM device Android is already using. It samples kernel mm_stat and system swap-in/swap-out counters while applying a small bounded in-app memory workload. It does not require root and never writes to, resets, or reconfigures ZRAM.",
+              "Run a standalone test to create the first verified result. Kernel algorithms are discovered separately and are not silently switched.": "Run a live ZRAM observation. No root is requested. Results depend on Android exposing /proc and ZRAM statistics; if no swap traffic occurs during the sample, throughput is reported as zero rather than invented.",
+              "Standalone tests are clearly separated from real ZRAM measurements.": "The benchmark observes the existing active ZRAM device and system swap counters. It never creates another ZRAM device or writes directly to swap.",
+              "Start benchmark": "Start live ZRAM test",
+              "Safety: standalone compression only. No swapoff, no zram reset, no algorithm write, no memory-exhaustion test.": "No root required. Read-only ZRAM telemetry plus a bounded app-memory workload. The app never writes to the active ZRAM block device, changes the codec, creates another ZRAM device, or calls swapoff.",
+              "Verified benchmark result": "Live active ZRAM observation",
+              "Thread CPU time (avg per operation)": "Observed swap-out / swap-in time",
+              "CPU time is process thread CPU time from Android Debug; it is not whole-device CPU utilization or hardware cycles.": "Throughput is calculated from system-wide pswpout/pswpin page-counter changes during the observation window. It is not per-app attribution. If counters do not change, no swap throughput is claimed.",
+              "Observed swap-out / swap-in": "Median kernel write / read"
           }
           for old, new in replacements.items():
               s = s.replace(old, new)
           s = "\n".join(line for line in s.splitlines() if 'MetricCard("Median kernel write / read time"' not in line and 'MetricCard("Thread CPU time' not in line) + "\n"
           ui.write_text(s)
           gradle = root / "app/build.gradle.kts"
-          g = gradle.read_text().replace("versionCode = 1", "versionCode = 2").replace('versionName = "0.1.0"', 'versionName = "0.2.0"')
+          g = gradle.read_text().replace("versionCode = 1", "versionCode = 3").replace('versionName = "0.1.0"', 'versionName = "0.3.0"')
           gradle.write_text(g)
           PY
 
@@ -97,7 +97,7 @@ jobs:
         run: |
           APK="$RUNNER_TEMP/project/ZramBenchmarkPro/app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
-          cp "$APK" "$RUNNER_TEMP/ZramBenchmarkPro-v0.2.0-debug.apk"
+          cp "$APK" "$RUNNER_TEMP/ZramBenchmarkPro-v0.3.0-debug.apk"
           echo "path=$RUNNER_TEMP/ZramBenchmarkPro-v0.2.0-debug.apk" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK build artifact
@@ -114,13 +114,13 @@ jobs:
           APK_PATH: ${{ steps.apk.outputs.path }}
         shell: bash
         run: |
-          TAG="v0.2.0"
+          TAG="v0.3.0"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "$APK_PATH" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG" "$APK_PATH" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "ZRAM Benchmark Pro 0.2.0" \
+              --title "ZRAM Benchmark Pro 0.3.0" \
               --notes "Installable debug-signed APK for ZRAM Benchmark Pro 0.2.0. Benchmarks the codec selected on active swap using a separate temporary ZRAM device; it never writes to active swap. Requires root and kernel zram-control hot_add/hot_remove support."
           fi
