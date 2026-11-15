@@ -46,14 +46,14 @@ jobs:
               "Warming up and measuring standalone DEFLATE…": "Sampling the active system ZRAM…",
               "Completed · round-trip verified": "Completed · live system counters sampled",
               "Standalone benchmark": "Live active ZRAM benchmark",
-              "The initial engine tests JDK DEFLATE with identical deterministic mixed-content data, warm-up, repeated compression/decompression, and byte-for-byte round-trip verification. It is not a kernel ZRAM benchmark.": "The app observes the ZRAM device Android is already using. It samples kernel mm_stat and system swap-in/swap-out counters while applying a small bounded in-app memory workload. It does not require root and never writes to, resets, or reconfigures ZRAM.",
+              "The initial engine tests JDK DEFLATE with identical deterministic mixed-content data, warm-up, repeated compression/decompression, and byte-for-byte round-trip verification. It is not a kernel ZRAM benchmark.": "The app observes the ZRAM device Android is already using. It samples kernel mm_stat and active-device block-I/O counters (or system swap-in/swap-out counters as a fallback) while applying a small bounded in-app memory workload. It does not require root and never writes to, resets, or reconfigures ZRAM.",
               "Run a standalone test to create the first verified result. Kernel algorithms are discovered separately and are not silently switched.": "Run a live ZRAM observation. No root is requested. Results depend on Android exposing /proc and ZRAM statistics; if no swap traffic occurs during the sample, throughput is reported as zero rather than invented.",
               "Standalone tests are clearly separated from real ZRAM measurements.": "The benchmark observes the existing active ZRAM device and system swap counters. It never creates another ZRAM device or writes directly to swap.",
               "Start benchmark": "Start live ZRAM test",
               "Safety: standalone compression only. No swapoff, no zram reset, no algorithm write, no memory-exhaustion test.": "No root required. Read-only ZRAM telemetry plus a bounded app-memory workload. The app never writes to the active ZRAM block device, changes the codec, creates another ZRAM device, or calls swapoff.",
               "Verified benchmark result": "Live active ZRAM observation",
               "Thread CPU time (avg per operation)": "Observed swap-out / swap-in time",
-              "CPU time is process thread CPU time from Android Debug; it is not whole-device CPU utilization or hardware cycles.": "Throughput is calculated from system-wide pswpout/pswpin page-counter changes during the observation window. It is not per-app attribution. If counters do not change, no swap throughput is claimed.",
+              "CPU time is process thread CPU time from Android Debug; it is not whole-device CPU utilization or hardware cycles.": "Throughput uses the active ZRAM device's block-I/O counters when readable, with system-wide pswpout/pswpin as a fallback. It is not per-app attribution. If counters do not change, no swap throughput is claimed.",
               "Median compression / decompression": "Observed swap-out / swap-in (system-wide)"
           }
           for old, new in replacements.items():
