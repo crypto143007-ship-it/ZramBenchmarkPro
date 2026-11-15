@@ -31,6 +31,8 @@ jobs:
           unzip -q ZramBenchmarkPro-source.zip -d "$RUNNER_TEMP/project"
           test -f "$RUNNER_TEMP/project/ZramBenchmarkPro/settings.gradle.kts"
           test -f "$RUNNER_TEMP/project/ZramBenchmarkPro/app/build.gradle.kts"
+          # Overlay the corrected Kotlin source committed in the repository.
+          install -D app/src/main/java/com/zrambenchmark/pro/BenchmarkEngine.kt "$RUNNER_TEMP/project/ZramBenchmarkPro/app/src/main/java/com/zrambenchmark/pro/BenchmarkEngine.kt"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
