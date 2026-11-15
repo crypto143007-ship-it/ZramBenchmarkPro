@@ -139,7 +139,6 @@ object BenchmarkEngine {
         val codec = readText("$root/comp_algorithm")?.split(Regex("\\s+"))?.firstOrNull { it.startsWith("[") }?.removeSurrounding("[", "]")
             ?: "Selected codec unavailable (sysfs permission restricted)"
         val initialMm = mm(root)
-        val initialSwap = vmSwap()\n        val initialBlock = blockIo(root)
         val rounds = repetitions.coerceIn(1, 10)
         val totalBytes = dataSizeMiB.coerceIn(1, 32) * 1024 * 1024
         val retained = ArrayList<ByteArray>()
