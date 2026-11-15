@@ -94,35 +94,80 @@ object BenchmarkEngine {
         )
     }
 
-    suspend fun runStandalone(repetitions: Int = 5, dataSizeMiB: Int = 8, cancelled: () -> Boolean = { false }): BenchmarkResult = withContext(Dispatchers.Default) {
-        val source = makeDataset(dataSizeMiB.coerceIn(1, 32) * 1024 * 1024)
-        val compressTimes = mutableListOf<Double>()
-        val decompressTimes = mutableListOf<Double>()
-        var compressed = ByteArray(0)
-        var compCpu = 0L
-        var decompCpu = 0L
-        repeat(repetitions.coerceIn(1, 20) + 1) { index ->
-            if (cancelled()) throw InterruptedException("Benchmark cancelled")
-            val cpu0 = Debug.threadCpuTimeNanos()
-            val t0 = System.nanoTime()
-            val out = ByteArrayOutputStream()
-            DeflaterOutputStream(out, Deflater(Deflater.DEFAULT_COMPRESSION, false), 64 * 1024).use { it.write(source) }
-            val ct = (System.nanoTime() - t0) / 1e6
-            val cpu1 = Debug.threadCpuTimeNanos()
-            compressed = out.toByteArray()
-            val t1 = System.nanoTime()
-            val decoded = InflaterInputStream(ByteArrayInputStream(compressed)).use { it.readBytes() }
-            val dt = (System.nanoTime() - t1) / 1e6
-            val cpu2 = Debug.threadCpuTimeNanos()
-            if (!decoded.contentEquals(source)) throw IllegalStateException("Round-trip verification failed")
-            if (index > 0) { compressTimes += ct; decompressTimes += dt }
-            compCpu += max(0L, cpu1 - cpu0); decompCpu += max(0L, cpu2 - cpu1)
-        }
-        val cMed = median(compressTimes); val dMed = median(decompressTimes)
-        val avgC = compressTimes.average(); val avgD = decompressTimes.average()
-        BenchmarkResult("deflate (JDK)", "Standalone library", source.size.toLong(), compressed.size.toLong(), source.size.toDouble() / max(1, compressed.size), source.size.toLong() - compressed.size,
-            source.size / 1048576.0 / (avgC / 1000.0), source.size / 1048576.0 / (avgD / 1000.0), compCpu / 1e6 / repetitions, decompCpu / 1e6 / repetitions,
-            repetitions, cMed, dMed)
+    /** Uses a disposable hot-added ZRAM device configured with the codec selected on active swap. Requires root. */
+    suspend fun runKernel(repetitions: Int = 5, dataSizeMiB: Int = 8): BenchmarkResult = withContext(Dispatchers.IO) {
+        val swapLine = readText("/proc/swaps").orEmpty().lines().drop(1).firstOrNull { it.contains("zram") }
+            ?: error("No active ZRAM swap device")
+        val index = Regex("zram(\\d+)").find(swapLine)?.groupValues?.get(1) ?: error("Cannot identify active ZRAM device")
+        val activeRoot = "/sys/block/zram" + index
+        val codec = readText("$activeRoot/comp_algorithm")?.split(Regex("\\s+"))?.firstOrNull { it.startsWith("[") }?.removeSurrounding("[", "]")
+            ?: error("Cannot read the codec selected on active ZRAM")
+        val bytes = dataSizeMiB.coerceIn(1, 32) * 1024 * 1024
+        val rounds = repetitions.coerceIn(1, 20)
+        val input = File.createTempFile("zbp-kernel-", ".bin")
+        val output = File(input.parentFile, input.name + ".out")
+        try {
+            input.writeBytes(makeDataset(bytes))
+            val inPath = input.absolutePath.replace("'", "'\\''")
+            val outPath = output.absolutePath.replace("'", "'\\''")
+            val d = '$'
+            val script = """
+                set -eu
+                ADD=/sys/class/zram-control/hot_add
+                REMOVE=/sys/class/zram-control/hot_remove
+                [ -w "${d}ADD" ] || { echo 'ERROR=Kernel lacks writable hot_add'; exit 21; }
+                [ -w "${d}REMOVE" ] || { echo 'ERROR=Kernel lacks writable hot_remove; safe cleanup unavailable'; exit 22; }
+                IDX=${d}(cat "${d}ADD")
+                case "${d}IDX" in ''|*[!0-9]*) echo 'ERROR=Invalid scratch ZRAM index'; exit 23;; esac
+                ROOT=/sys/block/zram${d}IDX
+                DEV=/dev/block/zram${d}IDX
+                [ -e "${d}DEV" ] || DEV=/dev/zram${d}IDX
+                cleanup() { echo "${d}IDX" > "${d}REMOVE" 2>/dev/null || true; }
+                trap cleanup EXIT HUP INT TERM
+                [ -w "${d}ROOT/comp_algorithm" ] || { echo 'ERROR=Scratch codec control unavailable'; exit 24; }
+                echo '${codec}' > "${d}ROOT/comp_algorithm"
+                echo ${bytes} > "${d}ROOT/disksize"
+                [ -b "${d}DEV" ] || { echo 'ERROR=Scratch block device missing'; exit 25; }
+                IN='${inPath}'; OUT='${outPath}'; : > "${d}OUT"
+                WRITES=''; READS=''; i=0
+                while [ "${d}i" -lt ${rounds} ]; do
+                  T0=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
+                  dd if="${d}IN" of="${d}DEV" bs=4096 conv=fsync 2>/dev/null
+                  T1=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
+                  dd if="${d}DEV" of="${d}OUT" bs=4096 count=${d}((bytes/4096)) 2>/dev/null
+                  T2=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
+                  cmp -s "${d}IN" "${d}OUT" || { echo 'ERROR=Read-back verification failed'; exit 26; }
+                  W=${d}((T1-T0)); R=${d}((T2-T1))
+                  WRITES="${d}WRITES ${d}W"; READS="${d}READS ${d}R"; i=${d}((i+1))
+                done
+                set -- ${d}(cat "${d}ROOT/mm_stat")
+                echo CODEC='${codec}'; echo DEVICE=zram${d}IDX
+                echo ORIGINAL_BYTES=${d}1; echo COMPRESSED_BYTES=${d}2
+                echo WRITE_MS=${d}WRITES; echo READ_MS=${d}READS; echo VERIFIED=true
+            """.trimIndent()
+            val process = ProcessBuilder("su", "-c", "sh").redirectErrorStream(true).start()
+            process.outputStream.bufferedWriter().use { it.write(script) }
+            val response = process.inputStream.bufferedReader().readText()
+            val exit = process.waitFor()
+            if (exit != 0) {
+                val reason = Regex("ERROR=([^\\r\\n]+)").find(response)?.groupValues?.get(1)
+                    ?: response.takeLast(400).ifBlank { "Root command failed (exit $exit)" }
+                error(reason)
+            }
+            fun field(key: String) = Regex("(?m)^" + key + "=(.*)$").find(response)?.groupValues?.get(1)?.trim()
+                ?: error("Missing " + key + " in kernel response")
+            val original = field("ORIGINAL_BYTES").toLong()
+            val compressed = field("COMPRESSED_BYTES").toLong()
+            val writes = field("WRITE_MS").split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.toDouble() }.filter { it > 0 }
+            val reads = field("READ_MS").split(Regex("\\s+")).filter { it.isNotBlank() }.map { it.toDouble() }.filter { it > 0 }
+            if (field("VERIFIED") != "true" || original <= 0 || compressed <= 0 || writes.isEmpty() || reads.isEmpty()) error("Incomplete kernel benchmark statistics")
+            val writeMedian = median(writes); val readMedian = median(reads)
+            val device = field("DEVICE")
+            BenchmarkResult("$codec ($device)", "Native kernel ZRAM · temporary device", original, compressed,
+                original.toDouble() / compressed, original - compressed,
+                original / 1048576.0 / (writeMedian / 1000.0), original / 1048576.0 / (readMedian / 1000.0),
+                0.0, 0.0, writes.size, writeMedian, readMedian)
+        } finally { input.delete(); output.delete() }
     }
 
     private fun makeDataset(size: Int): ByteArray {
