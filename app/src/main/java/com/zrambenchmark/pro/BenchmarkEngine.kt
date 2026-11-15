@@ -104,6 +104,7 @@ object BenchmarkEngine {
             ?: error("Cannot read the codec selected on active ZRAM")
         val bytes = dataSizeMiB.coerceIn(1, 32) * 1024 * 1024
         val rounds = repetitions.coerceIn(1, 20)
+        val blocks = bytes / 4096
         val input = File.createTempFile("zbp-kernel-", ".bin")
         val output = File(input.parentFile, input.name + ".out")
         try {
@@ -117,9 +118,17 @@ object BenchmarkEngine {
                 REMOVE=/sys/class/zram-control/hot_remove
                 [ -w "${d}ADD" ] || { echo 'ERROR=Kernel lacks writable hot_add'; exit 21; }
                 [ -w "${d}REMOVE" ] || { echo 'ERROR=Kernel lacks writable hot_remove; safe cleanup unavailable'; exit 22; }
-                IDX=${d}(cat "${d}ADD")
-                case "${d}IDX" in ''|*[!0-9]*) echo 'ERROR=Invalid scratch ZRAM index'; exit 23;; esac
-                ROOT=/sys/block/zram${d}IDX
+                BEFORE=" "
+                for p in /sys/block/zram*; do [ -e "${d}p" ] && BEFORE="${d}BEFORE${d}${d}p##*/} "; done
+                echo 1 > "${d}ADD"
+                ROOT=""
+                for p in /sys/block/zram*; do
+                  [ -e "${d}p" ] || continue
+                  NAME=${d}p##*/}
+                  case "${d}BEFORE" in *" ${d}NAME "*) ;; *) ROOT="${d}p"; break;; esac
+                done
+                [ -n "${d}ROOT" ] || { echo 'ERROR=hot_add did not create a new ZRAM device'; exit 23; }
+                IDX=${d}ROOT##*zram}
                 DEV=/dev/block/zram${d}IDX
                 [ -e "${d}DEV" ] || DEV=/dev/zram${d}IDX
                 cleanup() { echo "${d}IDX" > "${d}REMOVE" 2>/dev/null || true; }
@@ -134,7 +143,7 @@ object BenchmarkEngine {
                   T0=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
                   dd if="${d}IN" of="${d}DEV" bs=4096 conv=fsync 2>/dev/null
                   T1=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
-                  dd if="${d}DEV" of="${d}OUT" bs=4096 count=${d}((bytes/4096)) 2>/dev/null
+                  dd if="${d}DEV" of="${d}OUT" bs=4096 count=$blocks 2>/dev/null
                   T2=${d}(awk '{printf "%.0f", ${d}1*1000}' /proc/uptime)
                   cmp -s "${d}IN" "${d}OUT" || { echo 'ERROR=Read-back verification failed'; exit 26; }
                   W=${d}((T1-T0)); R=${d}((T2-T1))
