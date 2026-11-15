@@ -119,16 +119,16 @@ object BenchmarkEngine {
                 [ -w "${d}ADD" ] || { echo 'ERROR=Kernel lacks writable hot_add'; exit 21; }
                 [ -w "${d}REMOVE" ] || { echo 'ERROR=Kernel lacks writable hot_remove; safe cleanup unavailable'; exit 22; }
                 BEFORE=" "
-                for p in /sys/block/zram*; do [ -e "${d}p" ] && BEFORE="${d}BEFORE${d}${d}p##*/} "; done
+                for p in /sys/block/zram*; do [ -e "${d}p" ] && BEFORE="${d}BEFORE ${d}{p##*/} "; done
                 echo 1 > "${d}ADD"
                 ROOT=""
                 for p in /sys/block/zram*; do
                   [ -e "${d}p" ] || continue
-                  NAME=${d}p##*/}
+                  NAME=${d}{p##*/}
                   case "${d}BEFORE" in *" ${d}NAME "*) ;; *) ROOT="${d}p"; break;; esac
                 done
                 [ -n "${d}ROOT" ] || { echo 'ERROR=hot_add did not create a new ZRAM device'; exit 23; }
-                IDX=${d}ROOT##*zram}
+                IDX=${d}{ROOT##*zram}
                 DEV=/dev/block/zram${d}IDX
                 [ -e "${d}DEV" ] || DEV=/dev/zram${d}IDX
                 cleanup() { echo "${d}IDX" > "${d}REMOVE" 2>/dev/null || true; }
