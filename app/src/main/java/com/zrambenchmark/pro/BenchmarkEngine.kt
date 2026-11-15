@@ -146,9 +146,9 @@ object BenchmarkEngine {
             // One small warm-up allocation is deliberately excluded from the observed interval.
             val warmup = ByteArray(256 * 1024) { (it * 31).toByte() }
             warmup[0] = 1
-            val warmStart = vmSwap()
             val baselineMm = mm(root) ?: initialMm
-            val baselineSwap = vmSwap()\n            val baselineBlock = blockIo(root)
+            val baselineSwap = vmSwap()
+            val baselineBlock = blockIo(root)
             val chunkSize = max(4096, totalBytes / rounds)
             val startNs = System.nanoTime()
             repeat(rounds) {
@@ -165,7 +165,8 @@ object BenchmarkEngine {
                 Thread.sleep(700)
             }
             val elapsedSeconds = ((System.nanoTime() - startNs).coerceAtLeast(1L)) / 1_000_000_000.0
-            val finalSwap = vmSwap()\n            val finalBlock = blockIo(root)
+            val finalSwap = vmSwap()
+            val finalBlock = blockIo(root)
             val finalMm = mm(root) ?: baselineMm
             val outPages = (finalSwap.first - baselineSwap.first).coerceAtLeast(0L)
             val inPages = (finalSwap.second - baselineSwap.second).coerceAtLeast(0L)
